@@ -52,7 +52,7 @@ float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
         std::cout << "dQ is not invertible! Fallback not implemented!" << std::endl;
     }
     if (!pr->cand) {
-        pr->cand = make_shared<Point>();
+        pr->cand = shared_ptr<Point>(new Point());
         pr->cand->Q = Q;
         pr->cand->pos = Eigen::Vector3d(v.x(), v.y(), v.z());
         
@@ -189,7 +189,7 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         if (s == "v") { // vertex
             Eigen::Vector3d v;
             ss >> v[0] >> v[1] >> v[2];
-            auto p = make_shared<Point>();
+            auto p = shared_ptr<Point>(new Point());
             p->pos = v;
             pts.push_back(p);
         } else if (s == "vn") {

@@ -31,6 +31,8 @@ public:
     Eigen::Matrix4d Q;
     vector<shared_ptr<Point>> adjs;
     vector<shared_ptr<Facet>> facets;
+public:
+	EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 class Facet {
@@ -78,7 +80,7 @@ public:
 
 class ObjSimplifier {
     vector<shared_ptr<Point>> pts;
-    vector<Eigen::Vector3d> normals;
+    vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> normals;
     vector<shared_ptr<PointPair>> pairs;
     float simplify_ratio = 0.2;
     
