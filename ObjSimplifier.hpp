@@ -32,7 +32,7 @@ public:
     vector<shared_ptr<Point>> adjs;
     vector<shared_ptr<Facet>> facets;
 public:
-	EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 class Facet {
@@ -83,6 +83,7 @@ class ObjSimplifier {
     vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> normals;
     vector<shared_ptr<PointPair>> pairs;
     float simplify_ratio = 0.2;
+    bool has_normal = false, has_texture = false;
     
 public:
     void initQ();

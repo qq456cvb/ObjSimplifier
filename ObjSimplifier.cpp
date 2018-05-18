@@ -13,7 +13,6 @@
 #endif
 
 
-
 void ObjSimplifier::initQ() {
     for (int i = 0; i < pts.size(); i++) {
         auto p = pts[i];
@@ -49,23 +48,68 @@ float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
     if (lu.isInvertible()) {
         v = dQ.inverse() * Eigen::Vector4d(0, 0, 0, 1);
     } else {
-        std::cout << "dQ is not invertible! Fallback not implemented!" << std::endl;
+        std::cout << "dQ is not invertible! Fallback to find on segment v1v2" << std::endl;
+        const auto &v1_pos = v1->pos;
+        const auto &v2_pos = v2->pos;
+        Eigen::Vector3d v1minusv2 = v1->pos - v2->pos;
+        Eigen::Vector3d q(Q(0, 3), Q(1, 3), Q(2, 3));
+
+        // symmetric
+        Eigen::Matrix3d Q33;
+        Q33 << Q(0, 0), Q(0, 1), Q(0, 2),
+                Q(1, 0), Q(1, 1), Q(1, 2),
+                Q(2, 0), Q(2, 1), Q(2, 2);
+        Eigen::Vector3d c = Q33 * v1minusv2;
+        double denom = c(0) * v1_pos.x() - c(0) * v2_pos.x()
+                + c(1) * v1_pos.y() - c(1) * v2_pos.y()
+                + c(2) * v1_pos.z() - c(2) * v2_pos.z();
+        if (abs(denom) < 1e-7) {
+            std::cout << "not differentiable on segment v1v2! Fallback to find among v1, v2, mid(v1, v2)" << std::endl;
+            Eigen::Vector4d v1_homo(v1_pos.x(), v1_pos.y(), v1_pos.z(), 1.);
+            Eigen::Vector4d v2_homo(v2_pos.x(), v2_pos.y(), v2_pos.z(), 1.);
+            Eigen::Vector4d vmid_homo = 0.5 * v1_homo + 0.5 * v2_homo;
+            double cost1 = v1_homo.transpose() * Q * v1_homo;
+            double cost2 = v2_homo.transpose() * Q * v2_homo;
+            double cost_mid = vmid_homo.transpose() * Q * vmid_homo;
+            if (cost1 < cost2) {
+                if (cost1 < cost_mid) {
+                    v = v1_homo;
+                } else {
+                    v = vmid_homo;
+                }
+            } else {
+                if (cost2 < cost_mid) {
+                    v = v2_homo;
+                } else {
+                    v = vmid_homo;
+                }
+            }
+        } else {
+            double qv = q.dot(v1minusv2);
+            double k = (c(0) * v2_pos.x() + c(1) * v2_pos.y() + c(2) * v2_pos.z() - qv);
+            if (k > 1) k = 1;
+            if (k < 0) k = 0;
+            Eigen::Vector3d v3 = k * v1_pos + (1 - k) * v2_pos;
+            v = Eigen::Vector4d(v3.x(), v3.y(), v3.z(), 1);
+        }
     }
     if (!pr->cand) {
         pr->cand = shared_ptr<Point>(new Point());
         pr->cand->Q = Q;
         pr->cand->pos = Eigen::Vector3d(v.x(), v.y(), v.z());
-        
-        // use least square to interpolate
-        Eigen::MatrixXd coord(3, 2);
-        coord <<v1->pos[0], v2->pos[0],
-        v1->pos[1], v2->pos[1],
-        v1->pos[2], v2->pos[2];
-        
-        Eigen::Vector2d coef = (coord.transpose() * coord).inverse() * coord.transpose() * pr->cand->pos;
-        
-        pr->cand->normal = coef[0] * v1->normal + coef[1] * v2->normal;
-        pr->cand->normal.normalize();
+
+        if (has_normal) {
+            // use least square to interpolate
+            Eigen::MatrixXd coord(3, 2);
+            coord <<v1->pos[0], v2->pos[0],
+            v1->pos[1], v2->pos[1],
+            v1->pos[2], v2->pos[2];
+
+            Eigen::Vector2d coef = (coord.transpose() * coord).inverse() * coord.transpose() * pr->cand->pos;
+
+            pr->cand->normal = coef[0] * v1->normal + coef[1] * v2->normal;
+            pr->cand->normal.normalize();
+        }
     }
 //    cout << "cost " <<  v.transpose() * Q * v << endl;
     return v.transpose() * Q * v;
@@ -200,7 +244,17 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         } else if (s == "f") {
             cnt ++;
             int a, b, c, d, e, f, g, h, i;
-            sscanf(buffer, "f %d/%d/%d %d/%d/%d %d/%d/%d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
+            ss >> s;
+            auto cnt = count(s.begin(), s.end(), '/');
+            if (cnt == 2) {
+                sscanf(buffer, "f %d/%d/%d %d/%d/%d %d/%d/%d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
+                has_normal = true;
+            } else if (cnt == 1) {
+                // TODO: add support for texture
+            } else {
+                sscanf(buffer, "f %d %d %d", &a, &d, &g);
+            }
+
             a -= 1;
             b -= 1;
             c -= 1;
@@ -211,12 +265,15 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
             h -= 1;
             i -= 1;
             
-            pts[a]->normal = normals[c];
-//            pts[a]->nindex = c;
-            pts[d]->normal = normals[f];
-//            pts[d]->nindex = f;
-            pts[g]->normal = normals[i];
-//            pts[g]->nindex = i;
+            if (has_normal) {
+                // assume each point has only one normal for all facets
+                pts[a]->normal = normals[c];
+                //            pts[a]->nindex = c;
+                pts[d]->normal = normals[f];
+                //            pts[d]->nindex = f;
+                pts[g]->normal = normals[i];
+                //            pts[g]->nindex = i;
+            }
             
             auto face = make_shared<Facet>();
             face->v1 = pts[a];
@@ -299,8 +356,10 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
     for (int i = 0; i < pts.size(); i++) {
         fs << "v " << pts[i]->pos.x() << " " << pts[i]->pos.y() << " " << pts[i]->pos.z() << endl;
     }
-    for (int i = 0; i < normals.size(); i++) {
-        fs << "vn " << normals[i].x() << " " << normals[i].y() << " " << normals[i].z() << endl;
+    if (has_normal) {
+        for (int i = 0; i < normals.size(); i++) {
+            fs << "vn " << normals[i].x() << " " << normals[i].y() << " " << normals[i].z() << endl;
+        }
     }
     
     vector<shared_ptr<Facet>> facets;
@@ -321,13 +380,17 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         auto v3 = facets[i]->v3.lock();
         
         size_t a = find(pts.begin(), pts.end(), v1) - pts.begin() + 1;
-        size_t c = find(normals.begin(), normals.end(), pts[a-1]->normal) - normals.begin() + 1;
         size_t d = find(pts.begin(), pts.end(), v2) - pts.begin() + 1;
-        size_t f = find(normals.begin(), normals.end(), pts[d-1]->normal) - normals.begin() + 1;
         size_t g = find(pts.begin(), pts.end(), v3) - pts.begin() + 1;
-        size_t j = find(normals.begin(), normals.end(), pts[g-1]->normal) - normals.begin() + 1;
         
-        fs << a << "/0/" << c << " " << d << "/0/" << f << " " << g << "/0/" << j << endl;
+        if (has_normal) {
+            size_t c = find(normals.begin(), normals.end(), pts[a-1]->normal) - normals.begin() + 1;
+            size_t f = find(normals.begin(), normals.end(), pts[d-1]->normal) - normals.begin() + 1;
+            size_t j = find(normals.begin(), normals.end(), pts[g-1]->normal) - normals.begin() + 1;
+            fs << a << "/0/" << c << " " << d << "/0/" << f << " " << g << "/0/" << j << endl;
+        } else {
+            fs << a << " " << d << " " << g << endl;
+        }
     }
     fs.close();
 }
