@@ -12,25 +12,60 @@
 #define MAX_BUFFER_SIZE 1024
 #endif
 
+Eigen::VectorXd ObjSimplifier::packAttr(shared_ptr<Point> p) {
+    Eigen::VectorXd result;
+    vector<double> attrs_vec;
+    for (int m = 0; m < 3; m++) {
+        attrs_vec.push_back(p->pos[m]);
+    }
+    if (has_normal) {
+        for (int m = 0; m < 3; m++) {
+            attrs_vec.push_back(p->normal[m]);
+        }
+    }
+    if (has_texture) {
+        for (int m = 0; m < 2; m++) {
+            attrs_vec.push_back(p->uv[m]);
+        }
+    }
+    result = Eigen::Map<Eigen::VectorXd>(attrs_vec.data(), attrs_vec.size());
+    return result;
+}
 
 void ObjSimplifier::initQ() {
     for (int i = 0; i < pts.size(); i++) {
         auto p = pts[i];
         auto facets = p->facets;
-        Eigen::Matrix4d Q = Eigen::Matrix4d::Zero();
+        Eigen::MatrixXd Q;
+        
         for (int j = 0; j < facets.size(); j++) {
             auto f = facets[j];
-            Eigen::MatrixXd coord(3, 4);
-            coord << f->v1.lock()->pos[0], f->v1.lock()->pos[1], f->v1.lock()->pos[2], 1,
-            f->v2.lock()->pos[0], f->v2.lock()->pos[1], f->v2.lock()->pos[2], 1,
-            f->v3.lock()->pos[0], f->v3.lock()->pos[1], f->v3.lock()->pos[2], 1;
-            Eigen::JacobiSVD<Eigen::MatrixXd> svd(coord, Eigen::ComputeFullU | Eigen::ComputeFullV);
-            Eigen::Vector4d param = svd.matrixV().col(3);
-            float normalizer = sqrt(param[0] * param[0] + param[1] * param[1] + param[2] * param[2]);
-            param /= normalizer;
+            Eigen::VectorXd v1_attr = packAttr(f->v1.lock());
+            Eigen::VectorXd v2_attr = packAttr(f->v2.lock());
+            Eigen::VectorXd v3_attr = packAttr(f->v3.lock());
+            Eigen::VectorXd e1 = v1_attr - v2_attr;
+            e1.normalize();
+            Eigen::VectorXd e2 = v3_attr - v2_attr - e1.dot(v3_attr - v2_attr) * e1;
+            e2.normalize();
             
-            auto K = param * param.transpose();
+            int n_dim = static_cast<int>(e1.size());
+            
+            Eigen::MatrixXd A = Eigen::MatrixXd::Identity(n_dim, n_dim) - e1 * e1.transpose() - e2 * e2.transpose();
+            double v2e1 = v2_attr.dot(e1), v2e2 = v2_attr.dot(e2);
+            Eigen::VectorXd b = v2e1 * e1 + v2e2 * e2 - v2_attr;
+            double c = v2_attr.dot(v2_attr) - v2e1 * v2e1 - v2e2 * v2e2;
+            
+            Eigen::MatrixXd Ab(A.rows(), A.cols() + b.cols());
+            Ab << A, b;
+            Eigen::MatrixXd bc(b.size() + 1, 1);
+            bc << b, c;
+            Eigen::MatrixXd K(Ab.rows() + 1, Ab.cols());
+            K << Ab, bc.transpose();
+            if (Q.size() == 0) {
+                Q = K;
+            } else {
             Q += K;
+        }
         }
         p->Q = Q;
     }
@@ -39,35 +74,37 @@ void ObjSimplifier::initQ() {
 float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
     auto v1 = pr->pr.first;
     auto v2 = pr->pr.second;
-    Eigen::Matrix4d Q = v1->Q + v2->Q;
-    Eigen::Matrix4d dQ = Q;
-    dQ.row(3).setZero();
-    dQ(3, 3) = 1.;
-    Eigen::FullPivLU<Eigen::Matrix4d> lu(dQ);
-    Eigen::Vector4d v;
+    Eigen::MatrixXd Q = v1->Q + v2->Q;
+    Eigen::MatrixXd dQ = Q;
+    dQ.row(Q.rows() - 1).setZero();
+    dQ(Q.rows() - 1, Q.cols() - 1) = 1.;
+    Eigen::FullPivLU<Eigen::MatrixXd> lu(dQ);
+    Eigen::VectorXd v;
     if (lu.isInvertible()) {
-        v = dQ.inverse() * Eigen::Vector4d(0, 0, 0, 1);
+        Eigen::VectorXd tmp(dQ.cols());
+        tmp.fill(0);
+        tmp[tmp.size() - 1] = 1.;
+        v = dQ.inverse() * tmp;
     } else {
         std::cout << "dQ is not invertible! Fallback to find on segment v1v2" << std::endl;
-        const auto &v1_pos = v1->pos;
-        const auto &v2_pos = v2->pos;
-        Eigen::Vector3d v1minusv2 = v1->pos - v2->pos;
-        Eigen::Vector3d q(Q(0, 3), Q(1, 3), Q(2, 3));
+        auto v1_attr = packAttr(v1);
+        auto v2_attr = packAttr(v2);
+        Eigen::VectorXd v1minusv2 = v1_attr - v2_attr;
+        Eigen::VectorXd q = Q.topRightCorner(Q.rows() - 1, 1);
 
         // symmetric
-        Eigen::Matrix3d Q33;
-        Q33 << Q(0, 0), Q(0, 1), Q(0, 2),
-                Q(1, 0), Q(1, 1), Q(1, 2),
-                Q(2, 0), Q(2, 1), Q(2, 2);
-        Eigen::Vector3d c = Q33 * v1minusv2;
-        double denom = c(0) * v1_pos.x() - c(0) * v2_pos.x()
-                + c(1) * v1_pos.y() - c(1) * v2_pos.y()
-                + c(2) * v1_pos.z() - c(2) * v2_pos.z();
+        Eigen::MatrixXd Q_lr = Q.topLeftCorner(Q.rows() - 1, Q.cols() - 1);
+        Eigen::VectorXd c = Q_lr * v1minusv2;
+        double denom = c.dot(v1minusv2);
         if (abs(denom) < 1e-7) {
             std::cout << "not differentiable on segment v1v2! Fallback to find among v1, v2, mid(v1, v2)" << std::endl;
-            Eigen::Vector4d v1_homo(v1_pos.x(), v1_pos.y(), v1_pos.z(), 1.);
-            Eigen::Vector4d v2_homo(v2_pos.x(), v2_pos.y(), v2_pos.z(), 1.);
-            Eigen::Vector4d vmid_homo = 0.5 * v1_homo + 0.5 * v2_homo;
+            Eigen::VectorXd v1_homo(v1_attr.size() + 1);
+            v1_homo.fill(1);
+            v1_homo.topRows(v1_attr.size()) = v1_attr;
+            Eigen::VectorXd v2_homo(v2_attr.size() + 1);
+            v2_homo.fill(1);
+            v2_homo.topRows(v2_attr.size()) = v2_attr;
+            Eigen::VectorXd vmid_homo = 0.5 * v1_homo + 0.5 * v2_homo;
             double cost1 = v1_homo.transpose() * Q * v1_homo;
             double cost2 = v2_homo.transpose() * Q * v2_homo;
             double cost_mid = vmid_homo.transpose() * Q * vmid_homo;
@@ -86,29 +123,23 @@ float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
             }
         } else {
             double qv = q.dot(v1minusv2);
-            double k = (c(0) * v2_pos.x() + c(1) * v2_pos.y() + c(2) * v2_pos.z() - qv);
+            double k = c.dot(v2_attr) - qv;
             if (k > 1) k = 1;
             if (k < 0) k = 0;
-            Eigen::Vector3d v3 = k * v1_pos + (1 - k) * v2_pos;
-            v = Eigen::Vector4d(v3.x(), v3.y(), v3.z(), 1);
+            Eigen::VectorXd v3 = k * v1_attr + (1 - k) * v2_attr;
+            v = Eigen::VectorXd(v3.size() + 1);
+            v.fill(1);
+            v.topRows(v3.size()) = v3;
         }
     }
+    // force normalize
+    v.segment(3, 3).normalize();
     if (!pr->cand) {
         pr->cand = shared_ptr<Point>(new Point());
         pr->cand->Q = Q;
-        pr->cand->pos = Eigen::Vector3d(v.x(), v.y(), v.z());
-
+        pr->cand->pos = v.topRows(3);
         if (has_normal) {
-            // use least square to interpolate
-            Eigen::MatrixXd coord(3, 2);
-            coord <<v1->pos[0], v2->pos[0],
-            v1->pos[1], v2->pos[1],
-            v1->pos[2], v2->pos[2];
-
-            Eigen::Vector2d coef = (coord.transpose() * coord).inverse() * coord.transpose() * pr->cand->pos;
-
-            pr->cand->normal = coef[0] * v1->normal + coef[1] * v2->normal;
-            pr->cand->normal.normalize();
+            pr->cand->normal = v.segment(3, 3);
         }
     }
 //    cout << "cost " <<  v.transpose() * Q * v << endl;
@@ -223,6 +254,12 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
     // load the OBJ file here
     char buffer[MAX_BUFFER_SIZE];
     int cnt = 0;
+    Eigen::Vector3d pos_max(std::numeric_limits<double>::min(),
+                            std::numeric_limits<double>::min(),
+                            std::numeric_limits<double>::min()),
+        pos_min(std::numeric_limits<double>::max(),
+                std::numeric_limits<double>::max(),
+                std::numeric_limits<double>::max());
     while(fs.getline(buffer, MAX_BUFFER_SIZE))
     {
         stringstream ss(buffer);
@@ -233,6 +270,10 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         if (s == "v") { // vertex
             Eigen::Vector3d v;
             ss >> v[0] >> v[1] >> v[2];
+            for (int i = 0; i < 3; i++) {
+                pos_max[i] = max(pos_max[i], v[i]);
+                pos_min[i] = min(pos_min[i], v[i]);
+            }
             auto p = shared_ptr<Point>(new Point());
             p->pos = v;
             pts.push_back(p);
@@ -250,7 +291,7 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
                 sscanf(buffer, "f %d/%d/%d %d/%d/%d %d/%d/%d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
                 has_normal = true;
             } else if (cnt == 1) {
-                // TODO: add support for texture
+                
             } else {
                 sscanf(buffer, "f %d %d %d", &a, &d, &g);
             }
@@ -314,6 +355,13 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
     cout << "Original facet count " << cnt << endl;
     fs.close();
     
+    // rescale the position coordinates
+    Eigen::Vector3d pos_scale = pos_max - pos_min;
+    for (auto pt : pts) {
+        pt->pos = pt->pos - pos_min;
+        pt->pos = pt->pos.cwiseQuotient(pos_scale);
+    }
+    
     initQ();
     int total_size = 0;
     for (auto p : pts) {
@@ -354,7 +402,7 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
     }
     
     for (int i = 0; i < pts.size(); i++) {
-        fs << "v " << pts[i]->pos.x() << " " << pts[i]->pos.y() << " " << pts[i]->pos.z() << endl;
+        fs << "v " << pts[i]->pos.x() * pos_scale.x() + pos_min.x() << " " << pts[i]->pos.y() * pos_scale.y() + pos_min.y() << " " << pts[i]->pos.z() * pos_scale.z() + pos_min.z() << endl;
     }
     if (has_normal) {
         for (int i = 0; i < normals.size(); i++) {
@@ -391,6 +439,8 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         } else {
             fs << a << " " << d << " " << g << endl;
         }
+        
+        
     }
     fs.close();
 }

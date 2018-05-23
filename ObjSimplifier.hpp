@@ -15,6 +15,7 @@
 #include <memory>
 #include <fstream>
 #include <sstream>
+#include <climits>
 #include <iostream>
 #include <Eigen/Core>
 #include <Eigen/Dense>
@@ -28,7 +29,8 @@ class Point {
 public:
     Eigen::Vector3d pos;
     Eigen::Vector3d normal;
-    Eigen::Matrix4d Q;
+    Eigen::Vector2d uv;
+    Eigen::MatrixXd Q;
     vector<shared_ptr<Point>> adjs;
     vector<shared_ptr<Facet>> facets;
 public:
@@ -82,8 +84,11 @@ class ObjSimplifier {
     vector<shared_ptr<Point>> pts;
     vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> normals;
     vector<shared_ptr<PointPair>> pairs;
-    float simplify_ratio = 0.2;
+    float simplify_ratio = 0.5;
     bool has_normal = false, has_texture = false;
+    
+    Eigen::VectorXd packAttr(shared_ptr<Point> p);
+    
     
 public:
     void initQ();
