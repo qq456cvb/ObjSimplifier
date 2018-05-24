@@ -83,9 +83,11 @@ public:
 class ObjSimplifier {
     vector<shared_ptr<Point>> pts;
     vector<Eigen::Vector3d, Eigen::aligned_allocator<Eigen::Vector3d>> normals;
+    vector<Eigen::Vector2d, Eigen::aligned_allocator<Eigen::Vector2d>> uvs;
     vector<shared_ptr<PointPair>> pairs;
     float simplify_ratio = 0.5;
     bool has_normal = false, has_texture = false;
+    Eigen::Vector3d pos_scale;
     
     Eigen::VectorXd packAttr(shared_ptr<Point> p);
     

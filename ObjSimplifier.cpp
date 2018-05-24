@@ -64,8 +64,8 @@ void ObjSimplifier::initQ() {
             if (Q.size() == 0) {
                 Q = K;
             } else {
-            Q += K;
-        }
+                Q += K;
+            }
         }
         p->Q = Q;
     }
@@ -91,7 +91,7 @@ float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
         auto v2_attr = packAttr(v2);
         Eigen::VectorXd v1minusv2 = v1_attr - v2_attr;
         Eigen::VectorXd q = Q.topRightCorner(Q.rows() - 1, 1);
-
+        
         // symmetric
         Eigen::MatrixXd Q_lr = Q.topLeftCorner(Q.rows() - 1, Q.cols() - 1);
         Eigen::VectorXd c = Q_lr * v1minusv2;
@@ -132,14 +132,21 @@ float ObjSimplifier::evaluateCost(shared_ptr<PointPair> pr) {
             v.topRows(v3.size()) = v3;
         }
     }
-    // force normalize
-    v.segment(3, 3).normalize();
+    
     if (!pr->cand) {
         pr->cand = shared_ptr<Point>(new Point());
         pr->cand->Q = Q;
         pr->cand->pos = v.topRows(3);
         if (has_normal) {
+            // force normalize
+            v.segment(3, 3).normalize();
             pr->cand->normal = v.segment(3, 3);
+        }
+        if (has_texture) {
+            // clamp texture coordinates
+            v[v.size() - 1] = min(max(0., v[v.size() - 1]), 1.);
+            v[v.size() - 2] = min(max(0., v[v.size() - 2]), 1.);
+            pr->cand->uv = v.segment(v.size() - 2, 2);
         }
     }
 //    cout << "cost " <<  v.transpose() * Q * v << endl;
@@ -282,20 +289,36 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
             ss >> n[0] >> n[1] >> n[2];
             normals.push_back(n);
             normals.back().normalize();
+        } else if (s == "vt") {
+            // support 2d texture now
+            Eigen::Vector2d t;
+            ss >> t[0] >> t[1];
+            uvs.push_back(t);
         } else if (s == "f") {
             cnt ++;
             int a, b, c, d, e, f, g, h, i;
-            ss >> s;
-            auto cnt = count(s.begin(), s.end(), '/');
-            if (cnt == 2) {
-                sscanf(buffer, "f %d/%d/%d %d/%d/%d %d/%d/%d", &a, &b, &c, &d, &e, &f, &g, &h, &i);
-                has_normal = true;
-            } else if (cnt == 1) {
-                
-            } else {
-                sscanf(buffer, "f %d %d %d", &a, &d, &g);
+            int *arr[3][3] = {{&a, &b, &c}, {&d, &e, &f}, {&g, &h, &i}};
+            std::string segment;
+            
+            int m = 0;
+            while(ss >> segment)
+            {
+                stringstream sss(segment);
+                int n = 0;
+                while(std::getline(sss, segment, '/')) {
+                    if (segment.size() > 0) {
+                        *arr[m][n] = stoi(segment);
+                        if (n == 1) {
+                            has_texture = true;
+                        } else if (n == 2) {
+                            has_normal = true;
+                        }
+                    }
+                    n++;
+                }
+                m++;
             }
-
+            
             a -= 1;
             b -= 1;
             c -= 1;
@@ -309,11 +332,11 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
             if (has_normal) {
                 // assume each point has only one normal for all facets
                 pts[a]->normal = normals[c];
-                //            pts[a]->nindex = c;
+                pts[a]->uv = uvs[b];
                 pts[d]->normal = normals[f];
-                //            pts[d]->nindex = f;
+                pts[d]->uv = uvs[e];
                 pts[g]->normal = normals[i];
-                //            pts[g]->nindex = i;
+                pts[g]->uv = uvs[h];
             }
             
             auto face = make_shared<Facet>();
@@ -356,7 +379,7 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
     fs.close();
     
     // rescale the position coordinates
-    Eigen::Vector3d pos_scale = pos_max - pos_min;
+    pos_scale = pos_max - pos_min;
     for (auto pt : pts) {
         pt->pos = pt->pos - pos_min;
         pt->pos = pt->pos.cwiseQuotient(pos_scale);
@@ -409,6 +432,11 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
             fs << "vn " << normals[i].x() << " " << normals[i].y() << " " << normals[i].z() << endl;
         }
     }
+    if (has_texture) {
+        for (int i = 0; i < uvs.size(); i++) {
+            fs << "vt " << uvs[i].x() << " " << uvs[i].y() << " " << 0. << endl;
+        }
+    }
     
     vector<shared_ptr<Facet>> facets;
     for (int i = 0; i < pts.size(); i++) {
@@ -427,18 +455,22 @@ void ObjSimplifier::simplify(const char *file, const char* output) {
         auto v2 = facets[i]->v2.lock();
         auto v3 = facets[i]->v3.lock();
         
-        size_t a = find(pts.begin(), pts.end(), v1) - pts.begin() + 1;
-        size_t d = find(pts.begin(), pts.end(), v2) - pts.begin() + 1;
-        size_t g = find(pts.begin(), pts.end(), v3) - pts.begin() + 1;
-        
-        if (has_normal) {
-            size_t c = find(normals.begin(), normals.end(), pts[a-1]->normal) - normals.begin() + 1;
-            size_t f = find(normals.begin(), normals.end(), pts[d-1]->normal) - normals.begin() + 1;
-            size_t j = find(normals.begin(), normals.end(), pts[g-1]->normal) - normals.begin() + 1;
-            fs << a << "/0/" << c << " " << d << "/0/" << f << " " << g << "/0/" << j << endl;
-        } else {
-            fs << a << " " << d << " " << g << endl;
+        shared_ptr<Point> v[3] = { v1, v2, v3 };
+        for (int k = 0; k < 3; k++) {
+            size_t v_idx = find(pts.begin(), pts.end(), v[k]) - pts.begin() + 1;
+            fs << v_idx;
+            if (has_texture) {
+                size_t t_idx = find(uvs.begin(), uvs.end(), pts[v_idx - 1]->uv) - uvs.begin() + 1;
+                fs << "/" << t_idx;
+            }
+            if (has_normal) {
+                if (!has_texture) fs << "/";
+                size_t n_idx = find(normals.begin(), normals.end(), pts[v_idx - 1]->normal) - normals.begin() + 1;
+                fs << "/" << n_idx;
+            }
+            fs << " ";
         }
+        fs << endl;
         
         
     }
